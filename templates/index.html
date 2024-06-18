@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        input, button {
+            margin: 5px;
+            padding: 10px;
+        }
+        #messages {
+            margin-top: 20px;
+        }
+        video {
+            width: 100%;
+            max-width: 300px;
+            height: auto;
+            margin: 10px;
+            border: 1px solid #000;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebRTC Test Frontend</h1>
+
+    <h2>Login</h2>
+    <input type="text" id="username" placeholder="Username">
+    <input type="password" id="password" placeholder="Password">
+    <button onclick="login()">Login</button>
+    
+    <h2>WebSocket</h2>
+    <button onclick="connectSocket()">Connect WebSocket</button>
+
+    <h2>Actions</h2>
+    <input type="text" id="name" placeholder="Your Name">
+    <input type="text" id="target" placeholder="Target Name">
+    <button onclick="storeUser()">Store User</button>
+    <button onclick="startCall()">Start Call</button>
+    <button onclick="acceptCall()" id="acceptCallButton" style="display:none;">Accept Call</button>
+
+    <h2>Messages</h2>
+    <div id="messages"></div>
+
+    <video id="localVideo" autoplay muted></video>
+    <video id="remoteVideo" autoplay></video>
+
+    <script src="https://cdn.socket.io/4.0.1/socket.io.min.js"></script>
+    <script>
+        let socket;
+        let pc;
+        let localStream;
+        let remoteStream;
+        let remoteIceCandidates = [];
+
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:15.206.147.195:3478' },
+                {
+                    urls: 'turn:15.206.147.195:3478',
+                    username: 'emote',
+                    credential: 'emoteapp@12345'
+                }
+            ]
+        };
+
+        function login() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            fetch('/login', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ username, password })
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert('Login successful!');
+            })
+            .catch(error => console.error('Error:', error));
+        }
+
+        function connectSocket() {
+            socket = io();
+
+            socket.on('connect', () => {
+                console.log('Connected to server');
+                document.getElementById('messages').innerHTML += '<p>Connected to server</p>';
+            });
+
+            socket.on('offer_received', (data) => {
+                handleOffer(data.sdp, data.name);
+            });
+
+            socket.on('answer_received', (data) => {
+                handleAnswer(data.sdp);
+            });
+
+            socket.on('ice_candidate', (data) => {
+                handleIceCandidate(data.candidate);
+            });
+        }
+
+        function sendMessage(type, data) {
+            const name = document.getElementById('name').value;
+            socket.emit(type, { name, ...data });
+        }
+
+        function storeUser() {
+            sendMessage('store_user', {});
+        }
+
+        function startCall() {
+            const target = document.getElementById('target').value;
+            sendMessage('start_call', { target });
+            startWebRTC().then(() => {
+                createOffer();
+            });
+        }
+
+        async function startWebRTC() {
+            pc = new RTCPeerConnection(configuration);
+
+            pc.onicecandidate = function(event) {
+                if (event.candidate) {
+                    const target = document.getElementById('target').value;
+                    sendMessage('ice_candidate', { 
+                        target, 
+                        candidate: {
+                            sdpMLineIndex: event.candidate.sdpMLineIndex,
+                            sdpMid: event.candidate.sdpMid,
+                            sdpCandidate: event.candidate.candidate
+                        }
+                    });
+                }
+            };
+
+            pc.ontrack = function(event) {
+                if (!remoteStream) {
+                    remoteStream = new MediaStream();
+                    const remoteVideo = document.getElementById('remoteVideo');
+                    remoteVideo.srcObject = remoteStream;
+                }
+                remoteStream.addTrack(event.track);
+            };
+
+            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            const localVideo = document.getElementById('localVideo');
+            localVideo.srcObject = localStream;
+            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+        }
+
+        function createOffer() {
+            pc.createOffer().then(offer => {
+                return pc.setLocalDescription(offer);
+            }).then(() => {
+                const target = document.getElementById('target').value;
+                sendMessage('create_offer', { target, sdp: pc.localDescription.sdp });
+            }).catch(error => console.error('Error creating offer:', error));
+        }
+
+        function createAnswer() {
+            pc.createAnswer().then(answer => {
+                return pc.setLocalDescription(answer);
+            }).then(() => {
+                const target = document.getElementById('target').value;
+                console.log("target : ", target)
+                sendMessage('create_answer', { target, sdp: pc.localDescription.sdp });
+            }).catch(error => console.error('Error creating answer:', error));
+        }
+
+        function handleOffer(sdp, name) {
+            startWebRTC().then(() => {
+                pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp })).then(() => {
+                    document.getElementById('acceptCallButton').style.display = 'block';
+                    document.getElementById('target').value = name;
+                    // Add queued ICE candidates
+                    remoteIceCandidates.forEach(candidate => {
+                        pc.addIceCandidate(candidate).catch(error => console.error('Error adding ice candidate:', error));
+                    });
+                    remoteIceCandidates = [];
+                }).catch(error => console.error('Error setting remote description:', error));
+            }).catch(error => console.error('Error starting WebRTC:', error));
+        }
+
+        function handleAnswer(sdp) {
+            if (pc) {
+                pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp })).catch(error => console.error('Error setting remote description:', error));
+            }
+        }
+
+        function handleIceCandidate(candidate) {
+            const iceCandidate = new RTCIceCandidate({
+                sdpMLineIndex: candidate.sdpMLineIndex,
+                sdpMid: candidate.sdpMid,
+                candidate: candidate.sdpCandidate
+            });
+            if (pc && pc.remoteDescription) {
+                pc.addIceCandidate(iceCandidate).catch(error => console.error('Error adding ice candidate:', error));
+            } else {
+                remoteIceCandidates.push(iceCandidate);
+            }
+        }
+
+        function acceptCall() {
+            document.getElementById('acceptCallButton').style.display = 'none';
+            createAnswer();
+        }
+    </script>
+</body>
+</html>
