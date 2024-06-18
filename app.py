@@ -85,4 +85,4 @@ def handle_ice_candidate(data):
         print(f"Target {target} not found in users")
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0')
+    socketio.run(app, host='0.0.0.0', port=8000)
